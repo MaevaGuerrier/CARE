@@ -57,6 +57,9 @@ class PDControllerNode(Node):
         elif args.robot == "turtlebot4":
             waypoint_topic = "/robot2/waypoint"
             vel_topic = "/robot2/cmd_vel"
+        elif args.robot == "bunker":
+            waypoint_topic = "/bunker/waypoint"
+            vel_topic = "/cmd_vel"
         else:
             raise ValueError(f"Unknown robot type: {args.robot}")
 
@@ -104,7 +107,7 @@ class PDControllerNode(Node):
         )
 
     def _pd_control(self, wp: np.ndarray) -> Tuple[float, float]:
-        """Compute (v, w) for 2‑D or 4‑D waypoint."""
+        """Compute (v, w) for 2D or 4D waypoint."""
         if wp.size == 2:
             dx, dy = wp
             use_heading = False
@@ -112,7 +115,7 @@ class PDControllerNode(Node):
             dx, dy, hx, hy = wp
             use_heading = np.abs(dx) < EPS and np.abs(dy) < EPS
         else:
-            raise ValueError("Waypoint must be 2‑D or 4‑D vector")
+            raise ValueError("Waypoint must be 2D or 4D vector")
 
         if use_heading:
             v = 0.0
@@ -187,14 +190,14 @@ def main(args=None):
 
     parser = argparse.ArgumentParser()
     parser.add_argument(
-        "--control", type=str, default="nomad", help="control type (nomad, care)"
+        "--control", type=str, default="care", help="control type (nomad, care)"
     )
     parser.add_argument(
         "--robot",
         type=str,
         default="locobot",
-        choices=["locobot", "locobot2", "robomaster", "turtlebot4"],
-        help="Robot type (locobot, robomaster, turtlebot4)",
+        choices=["locobot", "locobot2", "robomaster", "turtlebot4", "bunker"],
+        help="Robot type (locobot, robomaster, turtlebot4, bunker)",
     )
     args, unknown = parser.parse_known_args()
 

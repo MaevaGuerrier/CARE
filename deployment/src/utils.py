@@ -157,6 +157,6 @@ def transform_images(pil_imgs: List[PILImage.Image], image_size: List[int], cent
     return torch.cat(transf_imgs, dim=1)
     
 
-# clip angle between -pi and pi
+# clip angle between -pi and pi.
 def clip_angle(angle):
     return np.mod(angle + np.pi, 2 * np.pi) - np.pi

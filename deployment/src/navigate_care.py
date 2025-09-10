@@ -26,6 +26,7 @@ from unidepth.models import UniDepthV2
 from unidepth.utils.camera import Pinhole
 
 THIS_DIR = Path.cwd()
+# TODO THIS IS NOT WORKING AS EXPECTED, FIX IT
 ROBOT_CONFIG_PATH = THIS_DIR / "deployment/config/robot.yaml"
 MODEL_CONFIG_PATH = THIS_DIR / "deployment/config/models.yaml"
 TOPOMAP_IMAGES_DIR = THIS_DIR / "deployment/topomaps/images"
@@ -100,6 +101,9 @@ class NavigationNode(Node):
         elif args.robot == "turtlebot4":
             self.safety_margin = 0.2
             self.proximity_threshold = 1.2
+        elif args.robot == "bunker":
+            self.safety_margin = 0.2
+            self.proximity_threshold = 1.2
         else:
             raise ValueError(f"Unsupported robot type: {self.args.robot}")
 
@@ -112,6 +116,8 @@ class NavigationNode(Node):
             self.DIM = (640, 360)
         elif args.robot == "turtlebot4":
             self.DIM = (320, 200)
+        elif args.robot == "bunker":
+            self.DIM = (680, 840) # image dimension fisheye
 
         intrinsics_path = self._get_intrinsics_path_from_config()
         self._init_depth_model(intrinsics_path)
@@ -134,6 +140,10 @@ class NavigationNode(Node):
             image_topic = "/robot2/oakd/rgb/preview/image_raw"
             waypoint_topic = "/robot2/waypoint"
             sampled_actions_topic = "/robot2/sampled_actions"
+        elif args.robot == "bunker":
+            image_topic = "/usb_cam/image_raw"
+            waypoint_topic = "/bunker/waypoint"
+            sampled_actions_topic = "/bunker/sampled_actions"
         else:
             raise ValueError(f"Unknown robot type: {args.robot}")
         self.create_subscription(Image, image_topic, self._image_cb, 1)
@@ -152,7 +162,9 @@ class NavigationNode(Node):
         self.get_logger().info("NAVIGATION NODE PARAMETERS (with APF)")
         self.get_logger().info("=" * 60)
         self.get_logger().info(f"Robot type: {self.args.robot}")
-        if self.args.robot == "locobot":
+        if self.args.robot == "bunker":
+            image_topic = "/usb_cam/image_raw"
+        elif self.args.robot == "locobot":
             image_topic = "/camera/image"
         elif self.args.robot == "robomaster":
             image_topic = "/camera/image_color"
@@ -297,6 +309,10 @@ class NavigationNode(Node):
             frame = cv2.resize(cv2_img, self.DIM)
             rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         elif self.args.robot == "turtlebot4":
+            frame = cv2_img.copy()
+            frame = cv2.resize(cv2_img, self.DIM)
+            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        elif self.args.robot == "bunker":
             frame = cv2_img.copy()
             frame = cv2.resize(cv2_img, self.DIM)
             rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
@@ -638,8 +654,6 @@ class NavigationNode(Node):
         pixels_per_m = 3.0
         lateral_scale = 1.0
         horizontal_scale = 1.0
-        # lateral_scale = 16.0
-        # horizontal_scale = 16.0
         robot_symbol_length = 10
 
         cv2.line(
@@ -707,8 +721,8 @@ def main():
         "--robot",
         type=str,
         default="locobot",
-        choices=["locobot", "robomaster", "turtlebot4"],
-        help="Robot type (locobot, robomaster, turtlebot4)",
+        choices=["locobot", "robomaster", "turtlebot4", "bunker"],
+        help="Robot type (locobot, robomaster, turtlebot4, bunker)",
     )
     args = parser.parse_args()
 
