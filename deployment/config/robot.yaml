@@ -7,3 +7,4 @@ graph_rate: 0.3333 # Hz
 
 # intrinsic path
 intrinsics_path: intrinsic/bunker/intrinsics.npy
+vel_navi_topic: /cmd_vel

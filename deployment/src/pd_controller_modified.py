@@ -20,15 +20,13 @@ import numpy as np
 import yaml
 import argparse
 
-import rclpy
-from rclpy.node import Node
+import rospy
 from geometry_msgs.msg import Twist
 from std_msgs.msg import Float32MultiArray, Bool
 
 from utils import clip_angle  # assumes utils.py provides this helper
-
-CONFIG_PATH = "deployment/config/robot.yaml"
-with open(CONFIG_PATH, "r") as f:
+ROBOT_CONFIG_PATH ="../config/robot.yaml"
+with open(ROBOT_CONFIG_PATH, "r") as f:
     robot_cfg = yaml.safe_load(f)
 
 MAX_V: float = robot_cfg["max_v"]
@@ -42,28 +40,15 @@ DISTANCE_REPORT_INTERVAL: float = 0.1
 MAX_TIME: float = 30000.0
 
 
-class PDControllerNode(Node):
+class PDControllerNode():
 
     def __init__(self, args: argparse.Namespace) -> None:
-        super().__init__("pd_controller")
+    
+        rospy.init_node("pd_controller_node", anonymous=True)
         self.controller_type = args.control
 
-        if args.robot == "locobot":
-            waypoint_topic = "/robot1/waypoint"
-            vel_topic = "/robot1/cmd_vel"
-        elif args.robot == "robomaster":
-            waypoint_topic = "/robot3/waypoint"
-            vel_topic = "/cmd_vel"
-        elif args.robot == "turtlebot4":
-            waypoint_topic = "/robot2/waypoint"
-            vel_topic = "/robot2/cmd_vel"
-        elif args.robot == "bunker":
-            waypoint_topic = "/bunker/waypoint"
-            vel_topic = "/cmd_vel"
-        else:
-            raise ValueError(f"Unknown robot type: {args.robot}")
-
-        self.get_logger().info(f"Robot Type: {args.robot}, Topics: {waypoint_topic}, {vel_topic}")
+        waypoint_topic = "/waypoint"
+        vel_topic = "/cmd_vel"
 
         self.waypoint: Optional[np.ndarray] = None
         self._last_wp_time: float = 0.0
@@ -78,27 +63,25 @@ class PDControllerNode(Node):
         self.start_time: float = time.time()
         self.total_time: float = 0.0
 
-        self.vel_pub = self.create_publisher(Twist, vel_topic, 1)
-        self.create_subscription(
-            Float32MultiArray, waypoint_topic, self._waypoint_cb, 1
-        )
-        self.create_subscription(Bool, "/topoplan/reached_goal", self._goal_cb, 1)
+        self.vel_pub = rospy.Publisher(vel_topic, Twist, queue_size=1)
+        rospy.Subscriber(waypoint_topic, Float32MultiArray, self._waypoint_cb, queue_size=1)
+        rospy.Subscriber("/topoplan/reached_goal", Bool, self._goal_cb, queue_size=1)
 
-        self.create_timer(1.0 / RATE, self._timer_cb)
-        self.get_logger().info(
+        rospy.Timer(rospy.Duration(1.0 / RATE), self._timer_cb)
+        rospy.loginfo(
             "PD controller node initialised – waiting for waypoints…"
         )
 
     def _waypoint_cb(self, msg: Float32MultiArray) -> None:
         self.waypoint = np.asarray(msg.data, dtype=float)
         self._last_wp_time = time.time()
-        self.get_logger().debug(f"Waypoint received: {self.waypoint.tolist()}")
+        rospy.loginfo(f"Waypoint received: {self.waypoint.tolist()}")
 
     def _goal_cb(self, msg: Bool) -> None:
         self.reached_goal = msg.data
         if self.reached_goal:
-            self.get_logger().info(f"Total distance: {self.total_distance:.3f} m")
-            self.get_logger().info(f"Total time: {self.total_time:.3f} s")
+            rospy.loginfo(f"Total distance: {self.total_distance:.3f} m")
+            rospy.loginfo(f"Total time: {self.total_time:.3f} s")
 
     def _waypoint_valid(self) -> bool:
         return (
@@ -149,10 +132,10 @@ class PDControllerNode(Node):
         self.last_velocity_time = current_time
 
         if current_time - self.last_report_time >= DISTANCE_REPORT_INTERVAL:
-            self.get_logger().info(f"Current distance: {self.total_distance:.3f} m")
+            rospy.loginfo(f"Current distance: {self.total_distance:.3f} m")
             self.last_report_time = current_time
 
-    def _timer_cb(self) -> None:
+    def _timer_cb(self, event) -> None:
         vel_msg = Twist()
 
         current_time = time.time()
@@ -164,8 +147,8 @@ class PDControllerNode(Node):
 
         if self.reached_goal:
             self.vel_pub.publish(vel_msg)
-            self.get_logger().info("Reached goal – stopping controller.")
-            rclpy.shutdown()
+            rospy.loginfo("Reached goal – stopping controller.")
+            rospy.shutdown()
             return
 
         if self._waypoint_valid():
@@ -178,31 +161,26 @@ class PDControllerNode(Node):
             self.current_velocity = abs(v)
             self._update_distance(self.current_velocity)
 
-            self.get_logger().debug(f"Publishing velocity: v={v:.3f}, w={w:.3f}")
+            rospy.loginfo(f"Publishing velocity: v={v:.3f}, w={w:.3f}")
         else:
             self._update_distance(0.0)
 
         self.vel_pub.publish(vel_msg)
 
+    def _run(self):
+        rospy.spin()
 
 def main(args=None):
-    rclpy.init(args=args)
 
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--control", type=str, default="care", help="control type (nomad, care)"
     )
-    parser.add_argument(
-        "--robot",
-        type=str,
-        default="locobot",
-        choices=["locobot", "locobot2", "robomaster", "turtlebot4", "bunker"],
-        help="Robot type (locobot, robomaster, turtlebot4, bunker)",
-    )
-    args, unknown = parser.parse_known_args()
+
+    args, _ = parser.parse_known_args()
 
     node = PDControllerNode(args)
-    rclpy.spin(node)
+    node._run()
 
 
 if __name__ == "__main__":
