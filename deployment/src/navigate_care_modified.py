@@ -1,12 +1,3 @@
-from __future__ import annotations
-
-import argparse
-import os
-import time
-from collections import deque
-from pathlib import Path
-from typing import Deque, List, Tuple
-
 import cv2
 import numpy as np
 import rospy
@@ -14,6 +5,7 @@ from cv_bridge import CvBridge
 from PIL import Image as PILImage
 from sensor_msgs.msg import Image, PointCloud2
 from std_msgs.msg import Bool, Float32MultiArray
+import std_msgs.msg
 import sensor_msgs.point_cloud2 as pc2
 import torch
 import yaml
@@ -21,17 +13,19 @@ from diffusers.schedulers.scheduling_ddpm import DDPMScheduler
 
 from utils import msg_to_pil, to_numpy, transform_images, load_model
 from vint_train.training.train_utils import get_action
+from collections import deque
+from typing import Tuple, List
+
+# import tf2_ros
+# import tf2_sensor_msgs.tf2_sensor_msgs
+import argparse
+import os
+
 from viz_utils import *
 
 
-# UNIDEPTH 
-from unidepth.models import UniDepthV2
-from unidepth.utils.camera import Pinhole
-####
-
-
 TOPOMAP_IMAGES_DIR = "../topomaps/images"
-ROBOT_CONFIG_PATH ="../config/robot.yaml"
+ROBOT_CONFIG_PATH = "../config/robot.yaml"
 MODEL_CONFIG_PATH = "../config/models.yaml"
 
 IMAGE_TOPIC = "/camera/image_raw"
@@ -47,7 +41,6 @@ RATE = ROBOT_CONF["frame_rate"]  # Hz
 
 PIXELS_PER_M = 60.0  # px for 1 m (feel free to tune)
 ORIGIN_Y_RATIO = 0.95  # where to anchor trajectories vertically
-
 
 
 def _load_model(model_name: str, device: torch.device):
@@ -80,6 +73,8 @@ class NavigationNode:
 
         self.model, self.model_params = _load_model(args.model, self.device)
         rospy.loginfo(f"Using model type: {self.model_params['model_type']}")
+        # self.tf_buffer = tf2_ros.Buffer()
+        # self.tf_listener = tf2_ros.TransformListener(self.tf_buffer)
 
         self.context_size: int = self.model_params["context_size"]
 
@@ -102,28 +97,19 @@ class NavigationNode:
         self.top_view_size = (400, 400)
 
         self.safety_margin = 0.05
-        self.proximity_threshold = 1.0
+        self.proximity_threshold = 5
 
         self.top_view_resolution = self.top_view_size[0] / self.proximity_threshold
         self.top_view_sampling_step = 5
 
         self.DIM = (640, 480)
 
-        self.depth_model = UniDepthV2.from_pretrained("lpiccinelli/unidepth-v2-vits14").to(self.device)
-        self.depth_model.eval()
-
         self.topomap, self.goal_node = self._load_topomap(args.dir, args.goal_node)
 
         self.closest_node = 0
 
-        self.K = np.array([
-                [381.36246688113556,   0.0, 320.5],
-                [  0.0,               381.36246688113556, 240.5],
-                [  0.0,                 0.0,   1.0]
-            ])
-
         rospy.Subscriber(IMAGE_TOPIC, Image, self._image_cb, queue_size=1)
-        # rospy.Subscriber("/camera/depth/points", PointCloud2, self._pointcloud_callback)
+        rospy.Subscriber("/camera/depth/points", PointCloud2, self._pointcloud_callback)
 
         self.waypoint_pub = rospy.Publisher(
             WAYPOINT_TOPIC, Float32MultiArray, queue_size=1
@@ -138,15 +124,20 @@ class NavigationNode:
         self.goal_pub_img = rospy.Publisher("navigation_goal", Image, queue_size=1)
         self.path_pub = rospy.Publisher("traj_nomad", MarkerArray, queue_size=10)
         self.path_pub_care = rospy.Publisher("traj_care", MarkerArray, queue_size=10)
-        self.pub_obstacles = rospy.Publisher("obstacles", MarkerArray, queue_size=10)
+        # self.pub_obstacles = rospy.Publisher("obstacles", Image, queue_size=10)
         self.pub_pcd = rospy.Publisher("pointcloud_viz", PointCloud2, queue_size=10)
-        
+        self.image_pub = rospy.Publisher("obstacles", Image, queue_size=10)
+
         # rate = rospy.Rate(RATE)
         rospy.Timer(rospy.Duration(1.0 / RATE), self._timer_cb)
 
-    def _load_topomap(self, dir_path: str, goal_node: int) -> Tuple[List[PILImage.Image], int]:
-        topomap_filenames = sorted(os.listdir(os.path.join(
-        TOPOMAP_IMAGES_DIR, dir_path)), key=lambda x: int(x.split(".")[0]))
+    def _load_topomap(
+        self, dir_path: str, goal_node: int
+    ) -> Tuple[List[PILImage.Image], int]:
+        topomap_filenames = sorted(
+            os.listdir(os.path.join(TOPOMAP_IMAGES_DIR, dir_path)),
+            key=lambda x: int(x.split(".")[0]),
+        )
         topomap_dir = f"{TOPOMAP_IMAGES_DIR}/{dir_path}"
         num_nodes = len(os.listdir(topomap_dir))
         topomap = []
@@ -166,55 +157,43 @@ class NavigationNode:
         #     return
         self.context_queue.append(msg_to_pil(msg))
 
-        # Unidepth
-        cv2_img = self.bridge.imgmsg_to_cv2(msg)
-        frame = cv2.resize(cv2_img, self.DIM)
-        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    def _pointcloud_callback(self, msg: PointCloud2):
 
-        rgb_torch = (
-            torch.from_numpy(rgb).permute(2, 0, 1).unsqueeze(0).float().to(self.device)
+        # cloud_base = tf2_sensor_msgs.tf2_sensor_msgs.do_transform_cloud(
+        #     msg,
+        #     self.tf_buffer.lookup_transform(
+        #         "base_link", msg.header.frame_id, rospy.Time(0)
+        #     ),
+        # )
+
+        points = np.array(
+            [
+                [p[0], p[1], p[2]]
+                for p in pc2.read_points(
+                    msg, field_names=("x", "y", "z"), skip_nans=True
+                )
+            ]
         )
 
-        self.intrinsics_torch = torch.from_numpy(self.K).unsqueeze(0).to(self.device)
-        self.camera = Pinhole(K=self.intrinsics_torch)
+        # rospy.loginfo(f"Shape of points in pointcloud cb {points.shape}")
 
+        # Depth camera convention ? X- right Y down ? Z forward ?
+        X, Y, Z = points[:, 0], points[:, 1], points[:, 2]
+        # print(Z.min(), Z.max())
+        # Y is vertical (down), so filter ground:
+        # mask = (Z > 0) & (Z <= self.proximity_threshold) & (Y >= -0.05)
+        # points_filtered = points[mask]
+        header = msg.header
+        filtered_msg = pc2.create_cloud_xyz32(header, points.tolist())
+        self.pub_pcd.publish(filtered_msg)
 
-        with torch.no_grad():
-            outputs = self.depth_model.infer(rgb_torch, self.camera)
-            points = outputs["points"].squeeze().cpu().numpy()
-
-        X, Y, Z = points[0].flatten(), points[1].flatten(), points[2].flatten()
-        mask = (Z > 0) & (Z <= self.proximity_threshold) & (Y >= -0.05)
-        self._update_top_view_and_obstacles(X[mask], Y[mask], Z[mask])
-
-
-    # def _pointcloud_callback(self, msg: PointCloud2):
-    #     points = np.array(
-    #         [
-    #             [p[0], p[1], p[2]]
-    #             for p in pc2.read_points(
-    #                 msg, field_names=("x", "y", "z"), skip_nans=True
-    #             )
-    #         ]
-    #     )
-
-    #     # rospy.loginfo(f"Shape of points in pointcloud cb {points.shape}")
-
-    #     # Depth camera convention ? X- right Y down ? Z forward ?
-    #     X, Y, Z = points[:, 0], points[:, 1], points[:, 2]
-
-    #     # Y is vertical (down), so filter ground:
-    #     mask = (Y > 0.1) & (Y <= 15.0)
-    #     points_filtered = points[mask]
-    #     header = msg.header
-    #     filtered_msg = pc2.create_cloud_xyz32(header, points_filtered.tolist())
-    #     self.pub_pcd.publish(filtered_msg)
-
-    #     self._update_top_view_and_obstacles(X[mask], Y[mask], Z[mask])
-           
-
+        # self._update_top_view_and_obstacles(X[mask], Y[mask], Z[mask])
+        self._update_top_view_and_obstacles(X, Y, Z)
 
     def _update_top_view_and_obstacles(self, X, Y, Z_0):
+        # top_view_img = np.zeros(
+        #     (self.top_view_size[1], self.top_view_size[0]), dtype=np.uint8
+        # )
         Z = np.maximum(Z_0 - self.safety_margin, 1e-3)
         img_x = np.int32(self.top_view_size[0] // 2 + X * self.top_view_resolution)
         img_y = np.int32(self.top_view_size[1] - Z * self.top_view_resolution)
@@ -235,28 +214,72 @@ class NavigationNode:
         for x in range(0, self.top_view_size[0], self.top_view_sampling_step):
             col_idxs = np.where(img_x == x)[0]
             if len(col_idxs) > 0:
-                closest_idx = col_idxs[np.argmin(depth_vals[col_idxs])]
+                closest_idx = col_idxs[np.argmax(depth_vals[col_idxs])]
                 sampled_obstacles.append([real_x[closest_idx], real_z[closest_idx]])
 
         if sampled_obstacles:
+            img = np.ones(
+                (self.top_view_size[1], self.top_view_size[0], 3), dtype=np.uint8
+            )
             obs_array = np.array(sampled_obstacles)
             x_local = obs_array[:, 1]
             y_local = -obs_array[:, 0]
             self.obstacle_points = np.stack([x_local, y_local], axis=1)
+
+            for x, y in self.obstacle_points:
+                # Convert (x, y) in meters to pixel coordinates
+                px = int(self.top_view_size[0] // 2 + y * self.top_view_resolution)
+                py = int(self.top_view_size[1] - x * self.top_view_resolution)
+
+                if 0 <= px < self.top_view_size[0] and 0 <= py < self.top_view_size[1]:
+                    color = (0, 165, 255)  # orange
+                    cv2.circle(img, (px, py), 3, color, -1)
+
+            ros_img = self.bridge.cv2_to_imgmsg(img, encoding="bgr8")
+            ros_img.header.stamp = rospy.Time.now()
+            ros_img.header.frame_id = "base_link"
+            self.image_pub.publish(ros_img)
+
         else:
+            img = np.ones(
+                (self.top_view_size[1], self.top_view_size[0], 3), dtype=np.uint8
+            )
             self.obstacle_points = None
+            ros_img = self.bridge.cv2_to_imgmsg(img, encoding="bgr8")
+            ros_img.header.stamp = rospy.Time.now()
+            ros_img.header.frame_id = "base_link"
+            self.image_pub.publish(ros_img)
 
+        # top_view_img[img_y, img_x] = 255
+        # ros_img = self.bridge.cv2_to_imgmsg(top_view_img, encoding="mono8")
+        # ros_img.header.stamp = rospy.Time.now()
+        # ros_img.header.frame_id = "base_link"
+        # self.pub_obstacles.publish(ros_img)
 
-        if self.obstacle_points is not None:
-            ma = MarkerArray()
-            for idx, paths in enumerate(self.obstacle_points):
-                r = 0.0
-                g = 1.0
-                b = 0.0
-                marker = make_path_marker(
-                    paths, idx, r, g, b, frame_id="base_link")
-                ma.markers.append(marker)
-            self.pub_obstacles.publish(ma) 
+    # ros_img = self.bridge.cv2_to_imgmsg(top_view_img, encoding="mono8")
+    # ros_img.header.stamp = rospy.Time.now()
+    # ros_img.header.frame_id = "base_link"
+    # self.pub_obstacles.publish(ros_img)
+
+    # if self.obstacle_points is not None:
+    #     points_3d = np.hstack(
+    #         [self.obstacle_points, np.zeros((self.obstacle_points.shape[0], 1))]
+    #     )
+
+    #     header = std_msgs.msg.Header()
+    #     header.stamp = rospy.Time.now()
+    #     header.frame_id = "base_link"  # your robot frame
+
+    #     cloud_msg = pc2.create_cloud_xyz32(header, points_3d.tolist())
+    #     self.pub_obstacles.publish(cloud_msg)
+    #     # ma = MarkerArray()
+    #     # for idx, paths in enumerate(self.obstacle_points):
+    #     #     r = 0.0
+    #     #     g = 1.0
+    #     #     b = 0.0
+    #     #     marker = make_path_marker(paths, idx, r, g, b, frame_id="base_link")
+    #     #     ma.markers.append(marker)
+    #     # self.pub_obstacles.publish(ma)
 
     def compute_repulsive_force(
         self, point: np.ndarray, obstacles: np.ndarray, influence_range=1.0
@@ -361,7 +384,6 @@ class NavigationNode:
         reached = bool(self.closest_node == self.goal_node)
         self.goal_pub.publish(Bool(data=reached))
 
-
     def _timer_cb_nomad(self):
         """NOMAD 모델을 위한 타이머 콜백 처리 (APF 포함)"""
         # -----------------------------------------------------------------
@@ -434,31 +456,25 @@ class NavigationNode:
 
         self.original_trajectories = traj_batch.copy()
 
-
-
         ma = MarkerArray()
         for idx, paths in enumerate(self.original_trajectories):
             r = 1.0
             g = 0.0
             b = 0.0
-            marker = make_path_marker(
-                paths, idx, r, g, b, frame_id="base_link")
+            marker = make_path_marker(paths, idx, r, g, b, frame_id="base_link")
             ma.markers.append(marker)
-        self.path_pub.publish(ma) 
-
+        self.path_pub.publish(ma)
 
         traj_batch = self.apply_repulsive_forces_to_trajectories(traj_batch)
-    
+
         ma = MarkerArray()
         for idx, paths in enumerate(traj_batch):
             r = 0.0
             g = 0.0
             b = 1.0
-            marker = make_path_marker(
-                paths, idx, r, g, b, frame_id="base_link")
+            marker = make_path_marker(paths, idx, r, g, b, frame_id="base_link")
             ma.markers.append(marker)
-        self.path_pub_care.publish(ma) 
-
+        self.path_pub_care.publish(ma)
 
         chosen_idx = self._select_closest_traj_angle(traj_batch, default_idx=0)
         chosen_waypoint = traj_batch[chosen_idx][self.args.waypoint]
@@ -537,7 +553,10 @@ def main():
     parser = argparse.ArgumentParser("Topological navigation with APF (ROS 2)")
     parser.add_argument("--model", "-m", default="nomad")
     parser.add_argument(
-        "--dir", "-d", default="sim_test", help="sub‑directory under ../topomaps/images/"
+        "--dir",
+        "-d",
+        default="sim_test",
+        help="sub‑directory under ../topomaps/images/",
     )
     parser.add_argument(
         "--goal-node", "-g", type=int, default=-1, help="Goal node index (-1 = last)"
@@ -556,8 +575,11 @@ def main():
     args = parser.parse_args()
 
     # rclpy.init()
-    node = NavigationNode(args)
-    node._run()
+    try:
+        node = NavigationNode(args)
+        node._run()
+    except KeyboardInterrupt:
+        exit()
 
     # try:
     #     rospy.spin()   # blocks until shutdown (CTRL+C or rosnode kill)
