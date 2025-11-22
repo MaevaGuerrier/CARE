@@ -28,10 +28,10 @@ TOPOMAP_IMAGES_DIR = "../topomaps/images"
 ROBOT_CONFIG_PATH = "../config/robot.yaml"
 MODEL_CONFIG_PATH = "../config/models.yaml"
 
-IMAGE_TOPIC = "/camera/image_raw"
+IMAGE_TOPIC = "/oak/rgb/image_raw" #"/usb_cam/image_raw" #"/camera/image_raw"
 WAYPOINT_TOPIC = "/waypoint"
 sampled_actions_topic = "/sampled_actions"
-DEPTH_POINT_CLOUD_TOPIC = "/camera/depth/points"
+DEPTH_POINT_CLOUD_TOPIC = "/oak/points" #"/depth_anything/depth_registered/points" #"/camera/depth/points"
 
 with open(ROBOT_CONFIG_PATH, "r") as f:
     ROBOT_CONF = yaml.safe_load(f)
@@ -109,7 +109,7 @@ class NavigationNode:
         self.closest_node = 0
 
         rospy.Subscriber(IMAGE_TOPIC, Image, self._image_cb, queue_size=1)
-        rospy.Subscriber("/camera/depth/points", PointCloud2, self._pointcloud_callback)
+        rospy.Subscriber(DEPTH_POINT_CLOUD_TOPIC, PointCloud2, self._pointcloud_callback)
 
         self.waypoint_pub = rospy.Publisher(
             WAYPOINT_TOPIC, Float32MultiArray, queue_size=1
@@ -165,7 +165,7 @@ class NavigationNode:
         #         "base_link", msg.header.frame_id, rospy.Time(0)
         #     ),
         # )
-
+        
         points = np.array(
             [
                 [p[0], p[1], p[2]]
@@ -175,20 +175,31 @@ class NavigationNode:
             ]
         )
 
-        # rospy.loginfo(f"Shape of points in pointcloud cb {points.shape}")
 
-        # Depth camera convention ? X- right Y down ? Z forward ?
+
+        rospy.loginfo(f"Shape of points in pointcloud cb {points.shape}")
+
+        # Depth camera convention ? X- left/right Y down ? Z forward ?
+        # OAK D PRO Y VERTICAL DOWN
         X, Y, Z = points[:, 0], points[:, 1], points[:, 2]
+        # print("X range:", np.min(X), np.max(X))
+        print("Y range before filtering:", np.min(Y), np.max(Y))
+        print("Z range before filtering:", np.min(Z), np.max(Z))
         # print(Z.min(), Z.max())
         # Y is vertical (down), so filter ground:
-        # mask = (Z > 0) & (Z <= self.proximity_threshold) & (Y >= -0.05)
+        mask = (Z > 0) & (Z <= self.proximity_threshold) & (Y >= -0.05)
         # points_filtered = points[mask]
+
+        # handling ceiling points
+        # mask = (Y <= 20)
+        points_filtered = points[mask]
+
         header = msg.header
-        filtered_msg = pc2.create_cloud_xyz32(header, points.tolist())
+        filtered_msg = pc2.create_cloud_xyz32(header, points_filtered.tolist())
         self.pub_pcd.publish(filtered_msg)
 
-        # self._update_top_view_and_obstacles(X[mask], Y[mask], Z[mask])
-        self._update_top_view_and_obstacles(X, Y, Z)
+        self._update_top_view_and_obstacles(X[mask], Y[mask], Z[mask])
+        # self._update_top_view_and_obstacles(X, Y, Z)
 
     def _update_top_view_and_obstacles(self, X, Y, Z_0):
         # top_view_img = np.zeros(
@@ -461,7 +472,7 @@ class NavigationNode:
             r = 1.0
             g = 0.0
             b = 0.0
-            marker = make_path_marker(paths, idx, r, g, b, frame_id="base_link")
+            marker = make_path_marker(paths, idx, r, g, b, frame_id="oak-d-base-frame") # base_link
             ma.markers.append(marker)
         self.path_pub.publish(ma)
 
@@ -472,7 +483,7 @@ class NavigationNode:
             r = 0.0
             g = 0.0
             b = 1.0
-            marker = make_path_marker(paths, idx, r, g, b, frame_id="base_link")
+            marker = make_path_marker(paths, idx, r, g, b, frame_id="oak-d-base-frame") # base_link
             ma.markers.append(marker)
         self.path_pub_care.publish(ma)
 
@@ -555,7 +566,7 @@ def main():
     parser.add_argument(
         "--dir",
         "-d",
-        default="sim_test",
+        default="new_lab",
         help="sub‑directory under ../topomaps/images/",
     )
     parser.add_argument(
