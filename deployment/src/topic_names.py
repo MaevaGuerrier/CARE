@@ -18,10 +18,10 @@ TELEOP_LAUNCH = "teleop_twist_keyboard.py"
 # image obs topics
 FRONT_IMAGE_TOPIC = "/usb_cam_front/image_raw" 
 REVERSE_IMAGE_TOPIC = "/usb_cam_reverse/image_raw"
-IMAGE_TOPIC = "/camera/image_raw" #"/oak/rgb/image_raw" #"/usb_cam/image_raw" #"/camera/image_raw"
+IMAGE_TOPIC = "/oak/rgb/image_raw" #"/usb_cam/image_raw" #"/camera/image_raw"
 CLOSEST_NODE_TOPIC = "/closest_node"
 WAYPOINT_TOPIC = "/waypoint"
-DEPTH_POINT_CLOUD_TOPIC = "/camera/depth/points" #"/oak/points" #"/depth_anything/depth_registered/points" 
+DEPTH_POINT_CLOUD_TOPIC = "/oak/points" #"/depth_anything/depth_registered/points" 
 
 
 

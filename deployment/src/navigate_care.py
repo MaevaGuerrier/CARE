@@ -44,6 +44,9 @@ PIXELS_PER_M = 60.0  # px for 1 m (feel free to tune)
 ORIGIN_Y_RATIO = 0.95  # where to anchor trajectories vertically
 
 
+BASE_LINK = "base_link"
+
+
 def _load_model(model_name: str, device: torch.device):
     with open(MODEL_CONFIG_PATH, "r") as f:
         model_paths = yaml.safe_load(f)
@@ -232,7 +235,7 @@ class NavigationNode:
 
             ros_img = self.bridge.cv2_to_imgmsg(img, encoding="bgr8")
             ros_img.header.stamp = rospy.Time.now()
-            ros_img.header.frame_id = "base_link"
+            ros_img.header.frame_id = BASE_LINK
             self.image_pub.publish(ros_img)
 
         else:
@@ -242,7 +245,7 @@ class NavigationNode:
             self.obstacle_points = None
             ros_img = self.bridge.cv2_to_imgmsg(img, encoding="bgr8")
             ros_img.header.stamp = rospy.Time.now()
-            ros_img.header.frame_id = "base_link"
+            ros_img.header.frame_id = BASE_LINK
             self.image_pub.publish(ros_img)
 
     def compute_repulsive_force(
@@ -562,7 +565,7 @@ def main():
     parser.add_argument(
         "--dir",
         "-d",
-        default="sim_test",
+        default="mist_office",
         help="sub‑directory under ../topomaps/images/",
     )
     parser.add_argument(
