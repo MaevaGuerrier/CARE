@@ -4,14 +4,14 @@ import rospy
 from cv_bridge import CvBridge
 from PIL import Image as PILImage
 from sensor_msgs.msg import Image, PointCloud2
-from std_msgs.msg import Bool, Float32MultiArray
+from std_msgs.msg import Bool, Float32MultiArray, Int32
 import std_msgs.msg
 import sensor_msgs.point_cloud2 as pc2
 import torch
 import yaml
 from diffusers.schedulers.scheduling_ddpm import DDPMScheduler
 
-from utils import msg_to_pil, to_numpy, transform_images, load_model
+from utils import msg_to_pil, to_numpy, transform_images, load_model, pil_to_msg
 from vint_train.training.train_utils import get_action
 from collections import deque
 from typing import Tuple, List
@@ -23,15 +23,16 @@ import os
 
 from viz_utils import *
 
+# UTILS
+from topic_names import (IMAGE_TOPIC,
+                        WAYPOINT_TOPIC,
+                        SAMPLED_ACTIONS_TOPIC,
+                        CLOSEST_NODE_TOPIC,
+                        DEPTH_POINT_CLOUD_TOPIC)
 
 TOPOMAP_IMAGES_DIR = "../topomaps/images"
 ROBOT_CONFIG_PATH = "../config/robot.yaml"
 MODEL_CONFIG_PATH = "../config/models.yaml"
-
-IMAGE_TOPIC = "/oak/rgb/image_raw" #"/usb_cam/image_raw" #"/camera/image_raw"
-WAYPOINT_TOPIC = "/waypoint"
-sampled_actions_topic = "/sampled_actions"
-DEPTH_POINT_CLOUD_TOPIC = "/oak/points" #"/depth_anything/depth_registered/points" #"/camera/depth/points"
 
 with open(ROBOT_CONFIG_PATH, "r") as f:
     ROBOT_CONF = yaml.safe_load(f)
@@ -116,9 +117,9 @@ class NavigationNode:
         )
         rospy.loginfo(f"Publishing waypoints to {WAYPOINT_TOPIC}")
         self.sampled_actions_pub = rospy.Publisher(
-            sampled_actions_topic, Float32MultiArray, queue_size=1
+            SAMPLED_ACTIONS_TOPIC, Float32MultiArray, queue_size=1
         )
-        self.goal_pub = rospy.Publisher("/topoplan/reached_goal", Bool, queue_size=1)
+        
         self.viz_pub = rospy.Publisher("navigation_viz", Image, queue_size=1)
         self.subgoal_pub = rospy.Publisher("navigation_subgoal", Image, queue_size=1)
         self.goal_pub_img = rospy.Publisher("navigation_goal", Image, queue_size=1)
@@ -127,6 +128,17 @@ class NavigationNode:
         # self.pub_obstacles = rospy.Publisher("obstacles", Image, queue_size=10)
         self.pub_pcd = rospy.Publisher("pointcloud_viz", PointCloud2, queue_size=10)
         self.image_pub = rospy.Publisher("obstacles", Image, queue_size=10)
+
+        # we might have duplicated topics here but we copy same structure as other baselines
+        # The topics are used for the metrics
+        # TODO: clean up eventually
+        self.waypoint_viz_pub = rospy.Publisher("viz_wp", PoseStamped, queue_size=1)
+        self.distances_pub = rospy.Publisher("/distances", Float32MultiArray, queue_size=1)
+        self.goal_pub = rospy.Publisher("/topoplan/reached_goal", Bool, queue_size=1)
+        self.goal_img_pub = rospy.Publisher("/topoplan/goal_img", Image, queue_size=1)
+        self.subgoal_img_pub = rospy.Publisher("/topoplan/subgoal_img", Image, queue_size=1)
+        self.closest_node_img_pub = rospy.Publisher("/topoplan/closest_node_img", Image, queue_size=1)
+        self.closest_node_pub = rospy.Publisher(CLOSEST_NODE_TOPIC, Int32, queue_size=10)
 
         # rate = rospy.Rate(RATE)
         rospy.Timer(rospy.Duration(1.0 / RATE), self._timer_cb)
@@ -152,20 +164,9 @@ class NavigationNode:
         return topomap, goal_node
 
     def _image_cb(self, msg: Image):
-        # now = rospy.Time.now()
-        # if (now - self.last_ctx_time).nanoseconds < self.ctx_dt * 1e9:
-        #     return
         self.context_queue.append(msg_to_pil(msg))
 
-    def _pointcloud_callback(self, msg: PointCloud2):
-
-        # cloud_base = tf2_sensor_msgs.tf2_sensor_msgs.do_transform_cloud(
-        #     msg,
-        #     self.tf_buffer.lookup_transform(
-        #         "base_link", msg.header.frame_id, rospy.Time(0)
-        #     ),
-        # )
-        
+    def _pointcloud_callback(self, msg: PointCloud2):        
         points = np.array(
             [
                 [p[0], p[1], p[2]]
@@ -174,24 +175,11 @@ class NavigationNode:
                 )
             ]
         )
-
-
-
-        rospy.loginfo(f"Shape of points in pointcloud cb {points.shape}")
-
-        # Depth camera convention ? X- left/right Y down ? Z forward ?
         # OAK D PRO Y VERTICAL DOWN
         X, Y, Z = points[:, 0], points[:, 1], points[:, 2]
-        # print("X range:", np.min(X), np.max(X))
-        print("Y range before filtering:", np.min(Y), np.max(Y))
-        print("Z range before filtering:", np.min(Z), np.max(Z))
-        # print(Z.min(), Z.max())
         # Y is vertical (down), so filter ground:
         mask = (Z > 0) & (Z <= self.proximity_threshold) & (Y >= -0.05)
-        # points_filtered = points[mask]
-
         # handling ceiling points
-        # mask = (Y <= 20)
         points_filtered = points[mask]
 
         header = msg.header
@@ -199,12 +187,8 @@ class NavigationNode:
         self.pub_pcd.publish(filtered_msg)
 
         self._update_top_view_and_obstacles(X[mask], Y[mask], Z[mask])
-        # self._update_top_view_and_obstacles(X, Y, Z)
 
     def _update_top_view_and_obstacles(self, X, Y, Z_0):
-        # top_view_img = np.zeros(
-        #     (self.top_view_size[1], self.top_view_size[0]), dtype=np.uint8
-        # )
         Z = np.maximum(Z_0 - self.safety_margin, 1e-3)
         img_x = np.int32(self.top_view_size[0] // 2 + X * self.top_view_resolution)
         img_y = np.int32(self.top_view_size[1] - Z * self.top_view_resolution)
@@ -260,37 +244,6 @@ class NavigationNode:
             ros_img.header.stamp = rospy.Time.now()
             ros_img.header.frame_id = "base_link"
             self.image_pub.publish(ros_img)
-
-        # top_view_img[img_y, img_x] = 255
-        # ros_img = self.bridge.cv2_to_imgmsg(top_view_img, encoding="mono8")
-        # ros_img.header.stamp = rospy.Time.now()
-        # ros_img.header.frame_id = "base_link"
-        # self.pub_obstacles.publish(ros_img)
-
-    # ros_img = self.bridge.cv2_to_imgmsg(top_view_img, encoding="mono8")
-    # ros_img.header.stamp = rospy.Time.now()
-    # ros_img.header.frame_id = "base_link"
-    # self.pub_obstacles.publish(ros_img)
-
-    # if self.obstacle_points is not None:
-    #     points_3d = np.hstack(
-    #         [self.obstacle_points, np.zeros((self.obstacle_points.shape[0], 1))]
-    #     )
-
-    #     header = std_msgs.msg.Header()
-    #     header.stamp = rospy.Time.now()
-    #     header.frame_id = "base_link"  # your robot frame
-
-    #     cloud_msg = pc2.create_cloud_xyz32(header, points_3d.tolist())
-    #     self.pub_obstacles.publish(cloud_msg)
-    #     # ma = MarkerArray()
-    #     # for idx, paths in enumerate(self.obstacle_points):
-    #     #     r = 0.0
-    #     #     g = 1.0
-    #     #     b = 0.0
-    #     #     marker = make_path_marker(paths, idx, r, g, b, frame_id="base_link")
-    #     #     ma.markers.append(marker)
-    #     # self.pub_obstacles.publish(ma)
 
     def compute_repulsive_force(
         self, point: np.ndarray, obstacles: np.ndarray, influence_range=1.0
@@ -386,7 +339,7 @@ class NavigationNode:
         self.sampled_actions_pub.publish(actions_msg)
 
         # chosen waypoint
-        rospy.loginfo(f"Publishing waypoint: {chosen}")
+        # rospy.loginfo(f"Publishing waypoint: {chosen}")
         wp_msg = Float32MultiArray()
         wp_msg.data = [float(chosen[0]), float(chosen[1]), 0.0, 0.0]
         self.waypoint_pub.publish(wp_msg)
@@ -394,6 +347,32 @@ class NavigationNode:
         # goal status
         reached = bool(self.closest_node == self.goal_node)
         self.goal_pub.publish(Bool(data=reached))
+
+
+    def _publish_sg_cnode_goal_imgs(self, topomap, closest_node, end, goal_node, model_params, crop=True):
+
+        goal_img = transform_images(topomap[goal_node], model_params["image_size"], center_crop=crop, return_img=True)
+        goal_img_msg = pil_to_msg(goal_img)
+        goal_img_msg.header.stamp = rospy.Time.now()
+        goal_img_msg.header.frame_id = "base_footprint"
+        goal_img_msg.encoding = "rgb8"
+        self.goal_img_pub.publish(goal_img_msg)
+
+        subgoal_img = transform_images(topomap[end], model_params["image_size"], center_crop=crop, return_img=True)
+        subgoal_img_msg = pil_to_msg(subgoal_img)
+        subgoal_img_msg.header.stamp = rospy.Time.now()
+        subgoal_img_msg.header.frame_id = "base_footprint"
+        subgoal_img_msg.encoding = "rgb8"
+        self.subgoal_img_pub.publish(subgoal_img_msg)
+
+
+        closest_node_img = transform_images(topomap[closest_node], model_params["image_size"], center_crop=crop, return_img=True)
+        closest_node_img_msg = pil_to_msg(closest_node_img)
+        closest_node_img_msg.header.stamp = rospy.Time.now()
+        closest_node_img_msg.header.frame_id = "base_footprint"
+        closest_node_img_msg.encoding = "rgb8"
+        self.closest_node_img_pub.publish(closest_node_img_msg)
+
 
     def _timer_cb_nomad(self):
         """NOMAD 모델을 위한 타이머 콜백 처리 (APF 포함)"""
@@ -421,6 +400,14 @@ class NavigationNode:
         goal_tensor = torch.cat(batch_goal_imgs, dim=0).to(self.device)
 
         mask = torch.zeros(1, device=self.device, dtype=torch.long)
+
+        self._publish_sg_cnode_goal_imgs(topomap=self.topomap, 
+                                         closest_node=self.closest_node, 
+                                         end=end, 
+                                         goal_node=self.goal_node, 
+                                         model_params=self.model_params, 
+                                         crop=True)
+
         with torch.no_grad():
             obsgoal_cond = self.model(
                 "vision_encoder",
@@ -431,8 +418,17 @@ class NavigationNode:
             dists = self.model("dist_pred_net", obsgoal_cond=obsgoal_cond)
             dists_np = to_numpy(dists.flatten())
 
+            distances_msg = Float32MultiArray()
+            distances_msg.data = dists_np
+            self.distances_pub.publish(distances_msg)
+
         min_idx = int(np.argmin(dists_np))
         self.closest_node = start + min_idx
+        rospy.loginfo(f"Closest node: {self.closest_node}")
+        closest_node_msg = Int32()
+        closest_node_msg.data = self.closest_node
+        self.closest_node_pub.publish(closest_node_msg)
+
         sg_idx = min(
             min_idx + int(dists_np[min_idx] < self.args.close_threshold),
             len(goal_tensor) - 1,
@@ -566,7 +562,7 @@ def main():
     parser.add_argument(
         "--dir",
         "-d",
-        default="new_lab",
+        default="sim_test",
         help="sub‑directory under ../topomaps/images/",
     )
     parser.add_argument(
@@ -576,13 +572,7 @@ def main():
     parser.add_argument("--close-threshold", "-t", type=float, default=3.0)
     parser.add_argument("--radius", "-r", type=int, default=4)
     parser.add_argument("--num-samples", "-n", type=int, default=8)
-    # parser.add_argument(
-    #     "--robot",
-    #     type=str,
-    #     default="locobot",
-    #     choices=["locobot", "robomaster", "turtlebot4"],
-    #     help="Robot type (locobot, robomaster, turtlebot4)",
-    # )
+
     args = parser.parse_args()
 
     # rclpy.init()
@@ -591,15 +581,6 @@ def main():
         node._run()
     except KeyboardInterrupt:
         exit()
-
-    # try:
-    #     rospy.spin()   # blocks until shutdown (CTRL+C or rosnode kill)
-    # except KeyboardInterrupt:
-    #     pass
-    # finally:
-    #     # no explicit destroy_node() in rospy
-    #     rospy.loginfo("Shutting down navigation_node")
-
 
 if __name__ == "__main__":
     main()

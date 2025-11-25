@@ -148,7 +148,7 @@ class PDControllerNode():
         if self.reached_goal:
             self.vel_pub.publish(vel_msg)
             rospy.loginfo("Reached goal – stopping controller.")
-            rospy.shutdown()
+            rospy.signal_shutdown("Reached goal. stopping controller.")
             return
 
         if self._waypoint_valid():
